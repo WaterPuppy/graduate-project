@@ -2,6 +2,7 @@
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import HomeIconButton from '../components/HomeIconButton.vue'
+import { getCurrentUserId } from '../utils/auth'
 
 const router = useRouter()
 const tab = ref('image')
@@ -78,6 +79,11 @@ async function generate() {
 
 async function saveReading() {
   if (!result.english || !result.chinese) return
+  const userId = getCurrentUserId()
+  if (!userId) {
+    errorText.value = '请先登录后再保存到趣味阅读'
+    return
+  }
   saving.value = true
   errorText.value = ''
   try {
@@ -85,6 +91,7 @@ async function saveReading() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        user_id: userId,
         title: form.title.trim() || 'AI导入文章',
         category: '我的导入',
         english: result.english,
@@ -93,7 +100,11 @@ async function saveReading() {
     })
     const data = await res.json()
     if (!res.ok) {
-      errorText.value = data.error || '保存失败'
+      if (res.status === 401) {
+        errorText.value = '登录状态已失效，请重新登录后保存'
+      } else {
+        errorText.value = data.error || '保存失败'
+      }
       return
     }
     router.push(`/reading/${data.id}`)

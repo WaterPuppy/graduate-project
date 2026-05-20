@@ -392,7 +392,7 @@ onBeforeUnmount(() => {
 
 .primary-btn { background: #26374f; }
 .ghost-btn { background: #3f4654; }
-.danger-btn { background: #dc2626; }
+.danger-btn { background: linear-gradient(90deg, #f2994a, #e18736); }
 
 
 .list-card {
@@ -439,7 +439,7 @@ onBeforeUnmount(() => {
 .delete-book-btn {
   border: none;
   border-radius: 6px;
-  background: rgba(220, 38, 38, 0.92);
+  background: linear-gradient(90deg, #f2994a, #e18736);
   color: #fff;
   padding: 6px 10px;
   cursor: pointer;

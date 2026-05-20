@@ -1,6 +1,7 @@
 <script setup>
 import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { clearUserSessionCache } from '../utils/auth'
 
 const router = useRouter()
 
@@ -98,7 +99,7 @@ function saveAuthUser(user) {
   if (user) {
     localStorage.setItem('auth-user', JSON.stringify(user))
   } else {
-    localStorage.removeItem('auth-user')
+    clearUserSessionCache()
   }
 }
 

@@ -18,6 +18,7 @@ const chatMessages = ref([
   { role: 'ai', text: 'Hi! I am your speaking coach. Say something in English and we can start practicing.' }
 ])
 const speakingLoading = ref(false)
+const ttsLoading = ref(false)
 const speechStatus = ref('idle')
 const speechError = ref('')
 
@@ -26,6 +27,7 @@ const speechSupport = computed(() => !!(window.SpeechRecognition || window.webki
 const speechButtonText = computed(() => {
   if (speechStatus.value === 'recognizing') return '正在识别...'
   if (speakingLoading.value) return 'AI思考中...'
+  if (ttsLoading.value) return '语音生成中...'
   return '开始说话'
 })
 
@@ -49,6 +51,48 @@ function playAudio(url) {
   if (!url) return
   const audio = new Audio(url)
   audio.play().catch(() => {})
+}
+
+function speakByBrowser(text) {
+  if (!text || !window.speechSynthesis) return
+  const utterance = new SpeechSynthesisUtterance(text)
+  utterance.lang = 'en-US'
+  window.speechSynthesis.cancel()
+  window.speechSynthesis.speak(utterance)
+}
+
+async function speakAiReply(text) {
+  const content = String(text || '').trim()
+  if (!content) return
+  ttsLoading.value = true
+  try {
+    const res = await fetch('http://127.0.0.1:5001/api/ai/speaking-tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: content })
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok || !data.success) {
+      speakByBrowser(content)
+      return
+    }
+    if (data.audioUrl) {
+      const audio = new Audio(data.audioUrl)
+      await audio.play()
+      return
+    }
+    if (data.audioBase64) {
+      const mime = data.mime || 'audio/mpeg'
+      const audio = new Audio(`data:${mime};base64,${data.audioBase64}`)
+      await audio.play()
+      return
+    }
+    speakByBrowser(content)
+  } catch {
+    speakByBrowser(content)
+  } finally {
+    ttsLoading.value = false
+  }
 }
 
 async function searchWord() {
@@ -156,7 +200,9 @@ async function sendSpeakingText(text) {
       speechError.value = data.error || 'AI回复失败，请稍后重试'
       return
     }
-    chatMessages.value.push({ role: 'ai', text: data.ai_reply || '' })
+    const reply = data.ai_reply || ''
+    chatMessages.value.push({ role: 'ai', text: reply })
+    await speakAiReply(reply)
   } catch {
     speechError.value = 'AI回复失败，请稍后重试'
   } finally {
@@ -168,25 +214,47 @@ function startSpeechRecognition() {
   if (!speechSupport.value || speakingLoading.value || speechStatus.value === 'recognizing') return
   speechError.value = ''
   const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition
+  console.log('[speech] startSpeechRecognition called', {
+    hasCtor: !!Ctor,
+    speakingLoading: speakingLoading.value,
+    speechStatus: speechStatus.value,
+    protocol: window.location.protocol,
+    host: window.location.host
+  })
   const recognition = new Ctor()
   recognition.lang = 'en-US'
   recognition.interimResults = false
   recognition.continuous = false
   recognition.onstart = () => {
+    console.log('[speech] onstart')
     speechStatus.value = 'recognizing'
   }
-  recognition.onerror = () => {
+  recognition.onerror = (event) => {
+    console.log('[speech] onerror', {
+      error: event?.error || '',
+      message: event?.message || '',
+      type: event?.type || ''
+    })
     speechStatus.value = 'idle'
-    speechError.value = '语音识别失败，请重试'
+    const reason = event?.error || 'unknown'
+    speechError.value = `语音识别失败：${reason}`
   }
   recognition.onend = () => {
+    console.log('[speech] onend')
     speechStatus.value = 'idle'
   }
   recognition.onresult = (event) => {
+    console.log('[speech] onresult', event)
     const transcript = event?.results?.[0]?.[0]?.transcript || ''
     sendSpeakingText(transcript)
   }
-  recognition.start()
+  try {
+    recognition.start()
+  } catch (error) {
+    console.log('[speech] start() threw', error)
+    speechStatus.value = 'idle'
+    speechError.value = `语音识别启动失败：${error?.name || 'error'}`
+  }
 }
 
 function clearChat() {
@@ -247,7 +315,7 @@ onMounted(() => {
           </button>
         </div>
         <div class="right">
-          <p><strong>中文释义：</strong>{{ state.result.chinese || '暂无释义' }}</p>
+          <p><strong>英文释义：</strong>{{ state.result.chinese || '暂无释义' }}</p>
           <p><strong>英文例句：</strong>{{ state.result.example || '暂无例句' }}</p>
           <p><strong>中文翻译：</strong>{{ state.result.exampleZh || '暂无翻译' }}</p>
           <p><strong>常见搭配：</strong>{{ state.result.collocations.join('；') || '暂无搭配' }}</p>

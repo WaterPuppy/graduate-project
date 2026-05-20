@@ -9,6 +9,8 @@ const activeCategory = ref(ARTICLE_CATEGORY_ALL)
 const readings = ref([])
 const loading = ref(false)
 const errorText = ref('')
+const isManageMode = ref(false)
+const selectedIds = ref([])
 
 const articleCategories = computed(() => {
   const categorySet = new Set(['英文短文', '电影名句', '我的导入'])
@@ -25,6 +27,49 @@ const filteredArticles = computed(() => {
 
 function openDetail(id) {
   router.push(`/reading/${id}`)
+}
+
+function isSelected(id) {
+  return selectedIds.value.includes(id)
+}
+
+function toggleSelected(id) {
+  if (!isManageMode.value) return
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = [...next]
+}
+
+function toggleManageMode() {
+  isManageMode.value = !isManageMode.value
+  if (!isManageMode.value) {
+    selectedIds.value = []
+  }
+}
+
+async function deleteSelected() {
+  if (selectedIds.value.length === 0) return
+  const ok = window.confirm(`确定删除选中的 ${selectedIds.value.length} 篇文章吗？`)
+  if (!ok) return
+  try {
+    const res = await fetch('http://127.0.0.1:5001/api/readings/batch_delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids: selectedIds.value }),
+    })
+    const data = await res.json()
+    if (!res.ok || !data.success) {
+      window.alert(data.error || '删除失败')
+      return
+    }
+    window.alert(`删除成功 ${data.deletedCount || 0} 篇文章`)
+    isManageMode.value = false
+    selectedIds.value = []
+    await fetchReadings()
+  } catch {
+    window.alert('删除失败')
+  }
 }
 
 async function fetchReadings() {
@@ -55,6 +100,10 @@ onMounted(() => {
     <header class="top-card">
       <HomeIconButton class="back-btn home-icon-btn" @click="router.push('/')" />
       <h1>趣味阅读</h1>
+      <button class="fav-btn" @click="toggleManageMode">
+        {{ isManageMode ? '取消管理' : '管理文章' }}
+      </button>
+      <button class="fav-btn delete-btn" :disabled="selectedIds.length === 0" @click="deleteSelected">删除选中</button>
       <button class="fav-btn import-btn" @click="router.push('/reading/import')">导入文章</button>
       <button class="fav-btn" @click="router.push('/books')">词库管理</button>
     </header>
@@ -76,7 +125,8 @@ onMounted(() => {
         v-for="article in filteredArticles"
         :key="article.id"
         class="article-card"
-        @click="openDetail(article.id)"
+        :class="{ selected: isSelected(article.id) }"
+        @click="isManageMode ? toggleSelected(article.id) : openDetail(article.id)"
       >
         <div class="cover">{{ article.title }}</div>
         <div class="meta">
@@ -114,7 +164,7 @@ onMounted(() => {
 
 .top-card {
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  grid-template-columns: auto 1fr auto auto auto auto;
   align-items: center;
   gap: 10px;
   padding: 10px;
@@ -139,6 +189,11 @@ onMounted(() => {
   color: #e6edf7;
   padding: 8px 12px;
   cursor: pointer;
+}
+
+.delete-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 
@@ -168,6 +223,11 @@ onMounted(() => {
   grid-template-columns: 280px 1fr;
   gap: 12px;
   cursor: pointer;
+  position: relative;
+}
+
+.article-card.selected {
+  border: 2px solid #f2994a;
 }
 
 .cover {

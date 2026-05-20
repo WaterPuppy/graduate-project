@@ -37,6 +37,22 @@ def table_columns(cursor, table_name):
     return {row[1] for row in cursor.fetchall()}
 
 
+def has_unique_constraint(cursor, table_name, expected_columns):
+    expected = list(expected_columns)
+    cursor.execute(f"PRAGMA index_list({table_name})")
+    indexes = cursor.fetchall()
+    for idx in indexes:
+        # PRAGMA index_list columns: seq, name, unique, origin, partial
+        if len(idx) < 3 or int(idx[2]) != 1:
+            continue
+        idx_name = idx[1]
+        cursor.execute(f"PRAGMA index_info({idx_name})")
+        cols = [row[2] for row in cursor.fetchall()]
+        if cols == expected:
+            return True
+    return False
+
+
 def ensure_schema():
     conn = get_conn()
     cursor = conn.cursor()
@@ -45,6 +61,7 @@ def ensure_schema():
         '''
         CREATE TABLE IF NOT EXISTS books (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 0,
             name TEXT NOT NULL,
             tag TEXT DEFAULT '',
             description TEXT DEFAULT '',
@@ -58,6 +75,7 @@ def ensure_schema():
         '''
         CREATE TABLE IF NOT EXISTS words (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 0,
             word TEXT,
             meaning TEXT,
             pos TEXT DEFAULT '未知',
@@ -72,6 +90,7 @@ def ensure_schema():
         '''
         CREATE TABLE IF NOT EXISTS wrong_words (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 0,
             word TEXT NOT NULL,
             meaning TEXT NOT NULL,
             pos TEXT DEFAULT '未知',
@@ -80,7 +99,7 @@ def ensure_schema():
             is_focus INTEGER NOT NULL DEFAULT 0,
             needs_review INTEGER NOT NULL DEFAULT 1,
             last_wrong_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(word, meaning)
+            UNIQUE(user_id, word, meaning)
         )
         '''
     )
@@ -89,6 +108,7 @@ def ensure_schema():
         '''
         CREATE TABLE IF NOT EXISTS study_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 0,
             word TEXT NOT NULL,
             book_id INTEGER,
             action TEXT NOT NULL,
@@ -112,6 +132,7 @@ def ensure_schema():
         '''
         CREATE TABLE IF NOT EXISTS readings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 0,
             title TEXT NOT NULL,
             category TEXT NOT NULL DEFAULT '英文短文',
             summary TEXT DEFAULT '',
@@ -122,6 +143,9 @@ def ensure_schema():
         )
         '''
     )
+    reading_columns = table_columns(cursor, 'readings')
+    if 'user_id' not in reading_columns:
+        cursor.execute("ALTER TABLE readings ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
 
     word_columns = table_columns(cursor, 'words')
     if 'pos' not in word_columns:
@@ -132,27 +156,38 @@ def ensure_schema():
         cursor.execute("ALTER TABLE words ADD COLUMN audio TEXT DEFAULT ''")
     if 'book_id' not in word_columns:
         cursor.execute("ALTER TABLE words ADD COLUMN book_id INTEGER")
+    if 'user_id' not in word_columns:
+        cursor.execute("ALTER TABLE words ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
     book_columns = table_columns(cursor, 'books')
     if 'tag' not in book_columns:
         cursor.execute("ALTER TABLE books ADD COLUMN tag TEXT DEFAULT ''")
+    if 'user_id' not in book_columns:
+        cursor.execute("ALTER TABLE books ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
 
     log_columns = table_columns(cursor, 'study_logs')
     if 'book_id' not in log_columns:
         cursor.execute("ALTER TABLE study_logs ADD COLUMN book_id INTEGER")
+    if 'user_id' not in log_columns:
+        cursor.execute("ALTER TABLE study_logs ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
     user_columns = table_columns(cursor, 'users')
     if 'avatar' not in user_columns:
         cursor.execute("ALTER TABLE users ADD COLUMN avatar TEXT DEFAULT ''")
 
     wrong_columns = table_columns(cursor, 'wrong_words')
+    if 'user_id' not in wrong_columns:
+        cursor.execute("ALTER TABLE wrong_words ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+        wrong_columns = table_columns(cursor, 'wrong_words')
     legacy_wrong = not {'error_count', 'is_mastered', 'is_focus', 'needs_review', 'last_wrong_at', 'pos'}.issubset(
         wrong_columns
     )
-    if legacy_wrong:
+    wrong_unique_ok = has_unique_constraint(cursor, 'wrong_words', ['user_id', 'word', 'meaning'])
+    if legacy_wrong or not wrong_unique_ok:
         cursor.execute("ALTER TABLE wrong_words RENAME TO wrong_words_legacy")
         cursor.execute(
             '''
             CREATE TABLE wrong_words (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL DEFAULT 0,
                 word TEXT NOT NULL,
                 meaning TEXT NOT NULL,
                 pos TEXT DEFAULT '未知',
@@ -161,18 +196,36 @@ def ensure_schema():
                 is_focus INTEGER NOT NULL DEFAULT 0,
                 needs_review INTEGER NOT NULL DEFAULT 1,
                 last_wrong_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(word, meaning)
+                UNIQUE(user_id, word, meaning)
             )
             '''
         )
-        cursor.execute(
-            '''
-            INSERT INTO wrong_words (word, meaning, pos, error_count, is_mastered, is_focus, needs_review, last_wrong_at)
-            SELECT word, meaning, '未知', COUNT(*), 0, 0, 1, MAX(CURRENT_TIMESTAMP)
-            FROM wrong_words_legacy
-            GROUP BY word, meaning
-            '''
-        )
+        legacy_columns = table_columns(cursor, 'wrong_words_legacy')
+        if {'user_id', 'error_count', 'is_mastered', 'is_focus', 'needs_review', 'last_wrong_at', 'pos'}.issubset(
+            legacy_columns
+        ):
+            cursor.execute(
+                '''
+                INSERT INTO wrong_words (user_id, word, meaning, pos, error_count, is_mastered, is_focus, needs_review, last_wrong_at)
+                SELECT user_id, word, meaning,
+                       COALESCE(NULLIF(TRIM(pos), ''), '未知'),
+                       COALESCE(error_count, 1),
+                       COALESCE(is_mastered, 0),
+                       COALESCE(is_focus, 0),
+                       COALESCE(needs_review, 1),
+                       COALESCE(last_wrong_at, CURRENT_TIMESTAMP)
+                FROM wrong_words_legacy
+                '''
+            )
+        else:
+            cursor.execute(
+                '''
+                INSERT INTO wrong_words (user_id, word, meaning, pos, error_count, is_mastered, is_focus, needs_review, last_wrong_at)
+                SELECT 0, word, meaning, '未知', COUNT(*), 0, 0, 1, MAX(CURRENT_TIMESTAMP)
+                FROM wrong_words_legacy
+                GROUP BY word, meaning
+                '''
+            )
         cursor.execute("DROP TABLE wrong_words_legacy")
 
     cursor.execute("SELECT COUNT(*) AS c FROM books")
@@ -226,15 +279,15 @@ def ensure_schema():
     conn.close()
 
 
-def get_word_pos(cursor, word, meaning):
+def get_word_pos(cursor, word, meaning, user_id=None):
     cursor.execute(
         '''
         SELECT COALESCE(NULLIF(TRIM(pos), ''), '未知') AS pos
         FROM words
-        WHERE word = ? AND meaning = ?
+        WHERE word = ? AND meaning = ? {user_filter}
         LIMIT 1
-        ''',
-        (word, meaning),
+        '''.format(user_filter='AND user_id = ?' if user_id else ''),
+        (word, meaning, user_id) if user_id else (word, meaning),
     )
     row = cursor.fetchone()
     return row['pos'] if row else '未知'
@@ -256,6 +309,20 @@ def serialize_wrong(row):
 
 
 ensure_schema()
+
+
+def require_user_id():
+    value = request.headers.get('X-User-Id')
+    if not value and request.is_json:
+        body = request.json or {}
+        value = body.get('user_id')
+    if not value:
+        value = request.args.get('user_id')
+    try:
+        uid = int(value)
+    except Exception:
+        uid = 0
+    return uid if uid > 0 else None
 
 
 def hash_password(raw_password):
@@ -358,6 +425,40 @@ def speaking_chat_with_qwen(user_text):
         return None
 
 
+def speaking_tts_with_qwen(text):
+    api_key = get_env_any('DASHSCOPE_API_KEY', 'QWEN_API_KEY')
+    if not api_key:
+        return None, 'missing_api_key'
+    body = {
+        'model': 'qwen-tts',
+        'input': {'text': text},
+        'parameters': {
+            'voice': 'Cherry',
+            'format': 'mp3',
+        },
+    }
+    req = urllib.request.Request(
+        'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+        data=json.dumps(body).encode('utf-8'),
+        headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode('utf-8'))
+        output = payload.get('output') or {}
+        audio = output.get('audio') or {}
+        audio_url = audio.get('url') or ''
+        audio_b64 = audio.get('data') or ''
+        if audio_url:
+            return {'audioUrl': audio_url, 'mime': 'audio/mpeg'}, None
+        if audio_b64:
+            return {'audioBase64': audio_b64, 'mime': 'audio/mpeg'}, None
+        return None, 'no_audio_in_response'
+    except Exception as e:
+        return None, str(e)
+
+
 def parse_qwen_bilingual(text):
     content = str(text or '').strip()
     if not content:
@@ -414,6 +515,104 @@ def extract_english_fallback(text):
     return '\n'.join(english_lines).strip()
 
 
+def enrich_dictionary_fields(word, definition, example, example_zh, collocations):
+    need_example = not str(example or '').strip()
+    need_example_zh = not str(example_zh or '').strip()
+    need_collocations = not isinstance(collocations, list) or len(collocations) == 0
+    if not (need_example or need_example_zh or need_collocations):
+        return example, example_zh, collocations
+
+    prompt = (
+        "你是英语学习助手。请仅返回 JSON，不要解释。"
+        "字段: example_en(英文例句), example_zh(中文翻译), collocations(英文常见搭配数组, 3-5个)。"
+        f"单词: {word}\n"
+        f"英文释义: {definition or ''}\n"
+        "要求: 内容简短自然，搭配只要短语。"
+    )
+    raw = call_qwen(
+        [
+            {'role': 'system', 'content': 'You are a helpful English learning assistant.'},
+            {'role': 'user', 'content': prompt},
+        ],
+        model='qwen-plus',
+    )
+    if not raw:
+        return example, example_zh, collocations
+
+    payload = None
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        m = re.search(r'\{[\s\S]*\}', raw)
+        if m:
+            try:
+                payload = json.loads(m.group(0))
+            except Exception:
+                payload = None
+    if not isinstance(payload, dict):
+        return example, example_zh, collocations
+
+    ai_example = str(payload.get('example_en') or '').strip()
+    ai_example_zh = str(payload.get('example_zh') or '').strip()
+    ai_collocations = payload.get('collocations')
+    if not isinstance(ai_collocations, list):
+        ai_collocations = []
+    ai_collocations = [str(item).strip() for item in ai_collocations if str(item).strip()]
+
+    final_example = example or ai_example
+    final_example_zh = example_zh or ai_example_zh
+    final_collocations = collocations if isinstance(collocations, list) and len(collocations) > 0 else ai_collocations
+    return final_example, final_example_zh, final_collocations
+
+
+def extract_local_dictionary_fallback(entry):
+    example = ''
+    collocations = []
+    if not isinstance(entry, dict):
+        return example, collocations
+    meanings = entry.get('meanings') or []
+    if not isinstance(meanings, list):
+        meanings = []
+    for meaning in meanings:
+        if not isinstance(meaning, dict):
+            continue
+        defs = (meaning or {}).get('definitions') or []
+        if not isinstance(defs, list):
+            defs = []
+        for d in defs:
+            if not isinstance(d, dict):
+                continue
+            ex = str((d or {}).get('example') or '').strip()
+            if ex and not example:
+                example = ex
+            # 用同义词/反义词和释义短语做基础搭配兜底
+            for key in ('synonyms', 'antonyms'):
+                values = (d or {}).get(key) or []
+                if isinstance(values, list):
+                    for v in values[:3]:
+                        text = str(v or '').strip()
+                        if text:
+                            collocations.append(text)
+            definition = str((d or {}).get('definition') or '').strip()
+            if definition:
+                # 取释义中的前半句作为短语兜底，避免全空
+                short = re.split(r'[.;:]', definition)[0].strip()
+                if 2 <= len(short.split()) <= 6:
+                    collocations.append(short)
+    # 去重且限制数量
+    dedup = []
+    seen = set()
+    for item in collocations:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(item)
+        if len(dedup) >= 5:
+            break
+    return example, dedup
+
+
 def image_to_data_url(image_bytes, filename='upload.png'):
     ext = (filename.rsplit('.', 1)[-1] if '.' in filename else 'png').lower()
     if ext == 'jpg':
@@ -426,6 +625,9 @@ def image_to_data_url(image_bytes, filename='upload.png'):
 
 @app.route('/api/readings', methods=['GET'])
 def list_readings():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
@@ -433,8 +635,10 @@ def list_readings():
         SELECT id, title, category, COALESCE(summary, '') AS summary, english, chinese,
                COALESCE(NULLIF(TRIM(date), ''), DATE(created_at)) AS date
         FROM readings
+        WHERE user_id = ?
         ORDER BY id DESC
-        '''
+        ''',
+        (user_id,),
     )
     rows = cursor.fetchall()
     conn.close()
@@ -456,6 +660,9 @@ def list_readings():
 
 @app.route('/api/readings/<int:reading_id>', methods=['GET'])
 def get_reading_detail(reading_id):
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
@@ -463,10 +670,10 @@ def get_reading_detail(reading_id):
         SELECT id, title, category, COALESCE(summary, '') AS summary, english, chinese,
                COALESCE(NULLIF(TRIM(date), ''), DATE(created_at)) AS date
         FROM readings
-        WHERE id = ?
+        WHERE id = ? AND user_id = ?
         LIMIT 1
         ''',
-        (reading_id,),
+        (reading_id, user_id),
     )
     row = cursor.fetchone()
     conn.close()
@@ -487,6 +694,9 @@ def get_reading_detail(reading_id):
 
 @app.route('/api/readings', methods=['POST'])
 def create_reading():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     data = request.json or {}
     title = (data.get('title') or '').strip() or 'AI导入文章'
     category = (data.get('category') or '').strip() or '我的导入'
@@ -503,15 +713,60 @@ def create_reading():
     cursor = conn.cursor()
     cursor.execute(
         '''
-        INSERT INTO readings (title, category, summary, english, chinese, date)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO readings (user_id, title, category, summary, english, chinese, date)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ''',
-        (title, category, summary, english, chinese, today),
+        (user_id, title, category, summary, english, chinese, today),
     )
     reading_id = cursor.lastrowid
     conn.commit()
     conn.close()
     return jsonify({'id': reading_id, 'title': title, 'category': category, 'english': english, 'chinese': chinese})
+
+
+@app.route('/api/readings/batch_delete', methods=['POST'])
+def batch_delete_readings():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'success': False, 'error': 'user_id required'}), 401
+    data = request.json or {}
+    ids = data.get('ids') or []
+    if not isinstance(ids, list):
+        return jsonify({'success': False, 'error': 'ids must be a list'}), 400
+
+    normalized_ids = []
+    for item in ids:
+        try:
+            value = int(item)
+            if value > 0:
+                normalized_ids.append(value)
+        except Exception:
+            continue
+    normalized_ids = list(dict.fromkeys(normalized_ids))
+
+    if len(normalized_ids) == 0:
+        return jsonify({'success': False, 'error': '没有可删除文章', 'deletedCount': 0}), 400
+
+    conn = get_conn()
+    cursor = conn.cursor()
+    placeholders = ','.join(['?'] * len(normalized_ids))
+    cursor.execute(
+        f'SELECT COUNT(*) AS c FROM readings WHERE user_id = ? AND id IN ({placeholders})',
+        (user_id, *normalized_ids),
+    )
+    matched = cursor.fetchone()['c'] or 0
+    if matched == 0:
+        conn.close()
+        return jsonify({'success': False, 'error': '没有可删除文章', 'deletedCount': 0}), 404
+
+    cursor.execute(
+        f'DELETE FROM readings WHERE user_id = ? AND id IN ({placeholders})',
+        (user_id, *normalized_ids),
+    )
+    deleted_count = cursor.rowcount if cursor.rowcount is not None else 0
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'deletedCount': int(deleted_count), 'matchedCount': int(matched)})
 
 
 @app.route('/api/ai/reading/import', methods=['POST'])
@@ -646,6 +901,9 @@ def login_user():
 
 @app.route('/books', methods=['GET'])
 def get_books():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
@@ -653,10 +911,12 @@ def get_books():
         SELECT b.id, b.name, b.description, b.cover, COUNT(w.id) AS total_count
         , COALESCE(NULLIF(TRIM(b.tag), ''), '未分类') AS tag
         FROM books b
-        LEFT JOIN words w ON w.book_id = b.id
+        LEFT JOIN words w ON w.book_id = b.id AND w.user_id = b.user_id
+        WHERE b.user_id = ?
         GROUP BY b.id
         ORDER BY b.id DESC
-        '''
+        ''',
+        (user_id,),
     )
     rows = cursor.fetchall()
     conn.close()
@@ -677,6 +937,9 @@ def get_books():
 
 @app.route('/books', methods=['POST'])
 def create_book():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     data = request.json or {}
     name = (data.get('name') or '').strip()
     tag = (data.get('tag') or '').strip()
@@ -689,10 +952,10 @@ def create_book():
     cursor = conn.cursor()
     cursor.execute(
         '''
-        INSERT INTO books (name, tag, description, cover)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO books (user_id, name, tag, description, cover)
+        VALUES (?, ?, ?, ?, ?)
         ''',
-        (name, tag, description, cover),
+        (user_id, name, tag, description, cover),
     )
     new_id = cursor.lastrowid
     conn.commit()
@@ -702,9 +965,12 @@ def create_book():
 
 @app.route('/books/<int:book_id>', methods=['DELETE'])
 def delete_book(book_id):
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM books ORDER BY id ASC")
+    cursor.execute("SELECT id FROM books WHERE user_id = ? ORDER BY id ASC", (user_id,))
     ids = [row['id'] for row in cursor.fetchall()]
     if book_id not in ids:
         conn.close()
@@ -713,8 +979,8 @@ def delete_book(book_id):
         conn.close()
         return jsonify({'error': '至少保留一个词库'}), 400
 
-    cursor.execute("DELETE FROM words WHERE book_id = ?", (book_id,))
-    cursor.execute("DELETE FROM books WHERE id = ?", (book_id,))
+    cursor.execute("DELETE FROM words WHERE book_id = ? AND user_id = ?", (book_id, user_id))
+    cursor.execute("DELETE FROM books WHERE id = ? AND user_id = ?", (book_id, user_id))
     conn.commit()
     conn.close()
     return jsonify({'msg': 'deleted'})
@@ -722,6 +988,9 @@ def delete_book(book_id):
 
 @app.route('/books/<int:book_id>/entries', methods=['GET'])
 def get_book_entries(book_id):
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     keyword = (request.args.get('keyword') or '').strip()
     conn = get_conn()
     cursor = conn.cursor()
@@ -730,20 +999,20 @@ def get_book_entries(book_id):
             '''
             SELECT id, word, meaning, COALESCE(NULLIF(TRIM(pos), ''), '未知') AS pos, COALESCE(phonetic, '') AS phonetic, COALESCE(audio, '') AS audio
             FROM words
-            WHERE book_id = ? AND (word LIKE ? OR meaning LIKE ?)
+            WHERE user_id = ? AND book_id = ? AND (word LIKE ? OR meaning LIKE ?)
             ORDER BY id DESC
             ''',
-            (book_id, f'%{keyword}%', f'%{keyword}%'),
+            (user_id, book_id, f'%{keyword}%', f'%{keyword}%'),
         )
     else:
         cursor.execute(
             '''
             SELECT id, word, meaning, COALESCE(NULLIF(TRIM(pos), ''), '未知') AS pos, COALESCE(phonetic, '') AS phonetic, COALESCE(audio, '') AS audio
             FROM words
-            WHERE book_id = ?
+            WHERE user_id = ? AND book_id = ?
             ORDER BY id DESC
             ''',
-            (book_id,),
+            (user_id, book_id),
         )
     rows = cursor.fetchall()
     conn.close()
@@ -768,6 +1037,9 @@ def get_book_entries(book_id):
 
 @app.route('/books/<int:book_id>/entries', methods=['POST'])
 def create_book_entry(book_id):
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     data = request.json or {}
     word = (data.get('word') or '').strip()
     meaning = (data.get('meaning') or '').strip()
@@ -781,10 +1053,10 @@ def create_book_entry(book_id):
     cursor = conn.cursor()
     cursor.execute(
         '''
-        INSERT INTO words (word, meaning, pos, phonetic, audio, book_id)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO words (user_id, word, meaning, pos, phonetic, audio, book_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ''',
-        (word, meaning, pos, phonetic, audio, book_id),
+        (user_id, word, meaning, pos, phonetic, audio, book_id),
     )
     new_id = cursor.lastrowid
     conn.commit()
@@ -794,9 +1066,12 @@ def create_book_entry(book_id):
 
 @app.route('/books/<int:book_id>/entries/<int:entry_id>', methods=['DELETE'])
 def delete_book_entry(book_id, entry_id):
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM words WHERE id = ? AND book_id = ?", (entry_id, book_id))
+    cursor.execute("DELETE FROM words WHERE id = ? AND book_id = ? AND user_id = ?", (entry_id, book_id, user_id))
     conn.commit()
     conn.close()
     return jsonify({'msg': 'deleted'})
@@ -804,6 +1079,9 @@ def delete_book_entry(book_id, entry_id):
 
 @app.route('/books/<int:book_id>/import_wrong', methods=['POST'])
 def import_wrong_words_to_book(book_id):
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     data = request.json or {}
     items = data.get('items') or []
     if not isinstance(items, list) or len(items) == 0:
@@ -816,7 +1094,7 @@ def import_wrong_words_to_book(book_id):
         pos = (item.get('pos') or '未知').strip() if isinstance(item, dict) else '未知'
         if not word or not meaning:
             continue
-        payload.append((word, meaning, pos or '未知', '', '', book_id))
+        payload.append((user_id, word, meaning, pos or '未知', '', '', book_id))
 
     if len(payload) == 0:
         return jsonify({'error': 'no valid items'}), 400
@@ -825,8 +1103,8 @@ def import_wrong_words_to_book(book_id):
     cursor = conn.cursor()
     cursor.executemany(
         '''
-        INSERT INTO words (word, meaning, pos, phonetic, audio, book_id)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO words (user_id, word, meaning, pos, phonetic, audio, book_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ''',
         payload,
     )
@@ -837,6 +1115,9 @@ def import_wrong_words_to_book(book_id):
 
 @app.route('/books/<int:book_id>/upload_excel', methods=['POST'])
 def upload_book_excel(book_id):
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     if load_workbook is None:
         return jsonify({'error': 'openpyxl is required for excel upload'}), 500
 
@@ -875,7 +1156,7 @@ def upload_book_excel(book_id):
         audio = str(row[3] or '').strip() if len(row) > 3 else ''
         if not word or not meaning:
             continue
-        payload.append((word, meaning, '未知', phonetic, audio, book_id))
+        payload.append((user_id, word, meaning, '未知', phonetic, audio, book_id))
 
     if len(payload) == 0:
         return jsonify({'error': 'no valid words found; check columns (word, meaning, phonetic, audio)'}), 400
@@ -884,8 +1165,8 @@ def upload_book_excel(book_id):
     cursor = conn.cursor()
     cursor.executemany(
         '''
-        INSERT INTO words (word, meaning, pos, phonetic, audio, book_id)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO words (user_id, word, meaning, pos, phonetic, audio, book_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ''',
         payload,
     )
@@ -896,6 +1177,9 @@ def upload_book_excel(book_id):
 
 @app.route('/books/<int:book_id>/words')
 def get_book_words_by_id(book_id):
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     list_type = request.args.get('type', 'learned')
     conn = get_conn()
     cursor = conn.cursor()
@@ -905,30 +1189,30 @@ def get_book_words_by_id(book_id):
             '''
             SELECT id, word, meaning, COALESCE(NULLIF(TRIM(pos), ''), '未知') AS pos, COALESCE(phonetic, '') AS phonetic, COALESCE(audio, '') AS audio
             FROM words
-            WHERE book_id = ?
+            WHERE user_id = ? AND book_id = ?
               AND word NOT IN (
                 SELECT DISTINCT word
                 FROM study_logs
-                WHERE action IN ('learn', 'review_correct') AND book_id = ?
+                WHERE user_id = ? AND action IN ('learn', 'review_correct') AND book_id = ?
               )
             ORDER BY word COLLATE NOCASE
             ''',
-            (book_id, book_id),
+            (user_id, book_id, user_id, book_id),
         )
     else:
         cursor.execute(
             '''
             SELECT id, word, meaning, COALESCE(NULLIF(TRIM(pos), ''), '未知') AS pos, COALESCE(phonetic, '') AS phonetic, COALESCE(audio, '') AS audio
             FROM words
-            WHERE book_id = ?
+            WHERE user_id = ? AND book_id = ?
               AND word IN (
                 SELECT DISTINCT word
                 FROM study_logs
-                WHERE action IN ('learn', 'review_correct') AND book_id = ?
+                WHERE user_id = ? AND action IN ('learn', 'review_correct') AND book_id = ?
               )
             ORDER BY word COLLATE NOCASE
             ''',
-            (book_id, book_id),
+            (user_id, book_id, user_id, book_id),
         )
 
     rows = cursor.fetchall()
@@ -955,6 +1239,9 @@ def get_book_words_by_id(book_id):
 
 @app.route('/question')
 def get_question():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     book_id = request.args.get('book_id', type=int)
     conn = get_conn()
     cursor = conn.cursor()
@@ -964,20 +1251,22 @@ def get_question():
             '''
             SELECT word, meaning, COALESCE(NULLIF(TRIM(pos), ''), '未知') AS pos, COALESCE(NULLIF(TRIM(phonetic), ''), '') AS phonetic, COALESCE(NULLIF(TRIM(audio), ''), '') AS audio
             FROM words
-            WHERE book_id = ?
+            WHERE user_id = ? AND book_id = ?
             ORDER BY RANDOM()
             LIMIT 4
             ''',
-            (book_id,),
+            (user_id, book_id),
         )
     else:
         cursor.execute(
             '''
             SELECT word, meaning, COALESCE(NULLIF(TRIM(pos), ''), '未知') AS pos, COALESCE(NULLIF(TRIM(phonetic), ''), '') AS phonetic, COALESCE(NULLIF(TRIM(audio), ''), '') AS audio
             FROM words
+            WHERE user_id = ?
             ORDER BY RANDOM()
             LIMIT 4
-            '''
+            ''',
+            (user_id,),
         )
 
     rows = cursor.fetchall()
@@ -1003,6 +1292,9 @@ def get_question():
 
 @app.route('/spelling_word')
 def get_spelling_word():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     mode = request.args.get('mode', 'normal')
     book_id = request.args.get('book_id', type=int)
     conn = get_conn()
@@ -1013,10 +1305,11 @@ def get_spelling_word():
             '''
             SELECT word, meaning, COALESCE(NULLIF(TRIM(pos), ''), '未知') AS pos
             FROM wrong_words
-            WHERE is_mastered = 0 AND needs_review = 1
+            WHERE user_id = ? AND is_mastered = 0 AND needs_review = 1
             ORDER BY RANDOM()
             LIMIT 1
-            '''
+            ''',
+            (user_id,),
         )
     else:
         if book_id:
@@ -1024,20 +1317,22 @@ def get_spelling_word():
                 '''
                 SELECT word, meaning, COALESCE(NULLIF(TRIM(pos), ''), '未知') AS pos
                 FROM words
-                WHERE book_id = ?
+                WHERE user_id = ? AND book_id = ?
                 ORDER BY RANDOM()
                 LIMIT 1
                 ''',
-                (book_id,),
+                (user_id, book_id),
             )
         else:
             cursor.execute(
                 '''
                 SELECT word, meaning, COALESCE(NULLIF(TRIM(pos), ''), '未知') AS pos
                 FROM words
+                WHERE user_id = ?
                 ORDER BY RANDOM()
                 LIMIT 1
-                '''
+                ''',
+                (user_id,),
             )
 
     row = cursor.fetchone()
@@ -1058,6 +1353,9 @@ def get_spelling_word():
 
 @app.route('/study/log', methods=['POST'])
 def add_study_log():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     data = request.json or {}
     word = data.get('word')
     book_id = data.get('bookId')
@@ -1069,10 +1367,10 @@ def add_study_log():
     cursor = conn.cursor()
     cursor.execute(
         '''
-        INSERT INTO study_logs (word, book_id, action)
-        VALUES (?, ?, ?)
+        INSERT INTO study_logs (user_id, word, book_id, action)
+        VALUES (?, ?, ?, ?)
         ''',
-        (word, book_id, action),
+        (user_id, word, book_id, action),
     )
     conn.commit()
     conn.close()
@@ -1081,6 +1379,9 @@ def add_study_log():
 
 @app.route('/study/today_summary')
 def get_today_summary():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     book_id = request.args.get('book_id', type=int)
     conn = get_conn()
     cursor = conn.cursor()
@@ -1090,22 +1391,22 @@ def get_today_summary():
             '''
             SELECT COUNT(DISTINCT word) AS learned_count
             FROM study_logs
-            WHERE action = 'learn'
+            WHERE user_id = ? AND action = 'learn'
               AND book_id = ?
               AND DATE(created_at, 'localtime') = DATE('now', 'localtime')
             ''',
-            (book_id,),
+            (user_id, book_id),
         )
         learned = cursor.fetchone()['learned_count'] or 0
         cursor.execute(
             '''
             SELECT COUNT(DISTINCT word) AS reviewed_count
             FROM study_logs
-            WHERE action = 'review_correct'
+            WHERE user_id = ? AND action = 'review_correct'
               AND book_id = ?
               AND DATE(created_at, 'localtime') = DATE('now', 'localtime')
             ''',
-            (book_id,),
+            (user_id, book_id),
         )
         reviewed = cursor.fetchone()['reviewed_count'] or 0
         cursor.execute(
@@ -1114,15 +1415,16 @@ def get_today_summary():
             FROM wrong_words ww
             WHERE ww.is_mastered = 0
               AND ww.needs_review = 1
+              AND ww.user_id = ?
               AND EXISTS (
                 SELECT 1
                 FROM words w
-                WHERE w.book_id = ?
+                WHERE w.user_id = ? AND w.book_id = ?
                   AND w.word = ww.word
                   AND w.meaning = ww.meaning
               )
             ''',
-            (book_id,),
+            (user_id, user_id, book_id),
         )
         unreviewed = cursor.fetchone()['unreviewed_count'] or 0
     else:
@@ -1130,24 +1432,27 @@ def get_today_summary():
             '''
             SELECT COUNT(DISTINCT word) AS learned_count
             FROM study_logs
-            WHERE action = 'learn' AND DATE(created_at, 'localtime') = DATE('now', 'localtime')
-            '''
+            WHERE user_id = ? AND action = 'learn' AND DATE(created_at, 'localtime') = DATE('now', 'localtime')
+            ''',
+            (user_id,),
         )
         learned = cursor.fetchone()['learned_count'] or 0
         cursor.execute(
             '''
             SELECT COUNT(DISTINCT word) AS reviewed_count
             FROM study_logs
-            WHERE action = 'review_correct' AND DATE(created_at, 'localtime') = DATE('now', 'localtime')
-            '''
+            WHERE user_id = ? AND action = 'review_correct' AND DATE(created_at, 'localtime') = DATE('now', 'localtime')
+            ''',
+            (user_id,),
         )
         reviewed = cursor.fetchone()['reviewed_count'] or 0
         cursor.execute(
             '''
             SELECT COUNT(*) AS unreviewed_count
             FROM wrong_words
-            WHERE is_mastered = 0 AND needs_review = 1
-            '''
+            WHERE user_id = ? AND is_mastered = 0 AND needs_review = 1
+            ''',
+            (user_id,),
         )
         unreviewed = cursor.fetchone()['unreviewed_count'] or 0
 
@@ -1157,6 +1462,9 @@ def get_today_summary():
 
 @app.route('/study/checkin_calendar')
 def get_checkin_calendar():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     year = request.args.get('year', type=int)
     month = request.args.get('month', type=int)
     threshold = 3
@@ -1176,13 +1484,13 @@ def get_checkin_calendar():
           CAST(strftime('%d', created_at, 'localtime') AS INTEGER) AS day,
           COUNT(DISTINCT word) AS learned_count
         FROM study_logs
-        WHERE action = 'learn'
+        WHERE user_id = ? AND action = 'learn'
           AND strftime('%Y', created_at, 'localtime') = ?
           AND strftime('%m', created_at, 'localtime') = ?
         GROUP BY strftime('%d', created_at, 'localtime')
         ORDER BY day ASC
         ''',
-        (y, m),
+        (user_id, y, m),
     )
     rows = cursor.fetchall()
     conn.close()
@@ -1216,20 +1524,36 @@ def dictionary_search():
         return jsonify({'error': 'word is required'}), 400
 
     url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word)}"
-    try:
-        with urllib.request.urlopen(url, timeout=8) as response:
-            payload = json.loads(response.read().decode('utf-8'))
-    except urllib.error.HTTPError as http_error:
-        if http_error.code == 404:
-            return jsonify({'error': 'not_found'}), 404
-        return jsonify({'error': 'query_failed'}), 502
-    except Exception:
+    payload = None
+    last_error = ''
+    for timeout in (8, 15):
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0',
+                    'Accept': 'application/json',
+                },
+                method='GET',
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                payload = json.loads(response.read().decode('utf-8'))
+            break
+        except urllib.error.HTTPError as http_error:
+            if http_error.code == 404:
+                return jsonify({'error': 'not_found'}), 404
+            last_error = f'HTTPError {http_error.code}'
+        except Exception as e:
+            last_error = str(e)
+
+    if payload is None:
+        print(f"[dictionary_search] upstream failed for '{word}': {last_error}")
         return jsonify({'error': 'query_failed'}), 502
 
     if not isinstance(payload, list) or len(payload) == 0:
         return jsonify({'error': 'not_found'}), 404
 
-    entry = payload[0]
+    entry = payload[0] if isinstance(payload[0], dict) else {}
     phonetic = entry.get('phonetic') or ''
     uk_phonetic = ''
     us_phonetic = ''
@@ -1272,6 +1596,24 @@ def dictionary_search():
     if first_meaning.get('example'):
         collocations.append(first_meaning['example'])
 
+    definition = first_meaning.get('definition', '')
+    example = first_meaning.get('example', '')
+    example_zh = ''
+    try:
+        fallback_example, fallback_collocations = extract_local_dictionary_fallback(entry)
+        example = example or fallback_example
+        if len(collocations) == 0 and len(fallback_collocations) > 0:
+            collocations = fallback_collocations
+        example, example_zh, collocations = enrich_dictionary_fields(
+            entry.get('word') or word,
+            definition,
+            example,
+            example_zh,
+            collocations,
+        )
+    except Exception as e:
+        print(f"[dictionary_search] enrich failed: {e}")
+
     return jsonify(
         {
             'word': entry.get('word') or word,
@@ -1283,9 +1625,9 @@ def dictionary_search():
             'usAudio': us_audio,
             'meanings': meanings,
             'partOfSpeechTags': part_of_speech_tags,
-            'definition': first_meaning.get('definition', ''),
-            'example': first_meaning.get('example', ''),
-            'exampleZh': '',
+            'definition': definition,
+            'example': example,
+            'exampleZh': example_zh,
             'collocations': collocations,
         }
     )
@@ -1303,8 +1645,25 @@ def ai_speaking_chat():
     return jsonify({'success': True, 'user_text': text, 'ai_reply': ai_reply})
 
 
+@app.route('/api/ai/speaking-tts', methods=['POST'])
+def ai_speaking_tts():
+    data = request.json or {}
+    text = str(data.get('text') or '').strip()
+    if not text:
+        return jsonify({'success': False, 'error': 'text is required'}), 400
+    if len(text) > 500:
+        text = text[:500]
+    audio_payload, error = speaking_tts_with_qwen(text)
+    if not audio_payload:
+        return jsonify({'success': False, 'error': error or 'tts_failed'}), 502
+    return jsonify({'success': True, **audio_payload})
+
+
 @app.route('/wrong', methods=['POST'])
 def add_wrong():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     data = request.json or {}
     word = data.get('word')
     meaning = data.get('answer') or data.get('meaning')
@@ -1313,19 +1672,19 @@ def add_wrong():
 
     conn = get_conn()
     cursor = conn.cursor()
-    pos = data.get('pos') or get_word_pos(cursor, word, meaning)
+    pos = data.get('pos') or get_word_pos(cursor, word, meaning, user_id=user_id)
     cursor.execute(
         '''
-        INSERT INTO wrong_words (word, meaning, pos, error_count, is_mastered, is_focus, needs_review, last_wrong_at)
-        VALUES (?, ?, ?, 1, 0, 0, 1, CURRENT_TIMESTAMP)
-        ON CONFLICT(word, meaning) DO UPDATE SET
+        INSERT INTO wrong_words (user_id, word, meaning, pos, error_count, is_mastered, is_focus, needs_review, last_wrong_at)
+        VALUES (?, ?, ?, ?, 1, 0, 0, 1, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id, word, meaning) DO UPDATE SET
             pos = excluded.pos,
             error_count = wrong_words.error_count + 1,
             is_mastered = 0,
             needs_review = 1,
             last_wrong_at = CURRENT_TIMESTAMP
         ''',
-        (word, meaning, pos),
+        (user_id, word, meaning, pos),
     )
     conn.commit()
     conn.close()
@@ -1334,6 +1693,9 @@ def add_wrong():
 
 @app.route('/wrong_question')
 def get_wrong_question():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
@@ -1345,23 +1707,24 @@ def get_wrong_question():
             COALESCE((
                 SELECT NULLIF(TRIM(w.phonetic), '')
                 FROM words w
-                WHERE w.word = ww.word AND w.meaning = ww.meaning
+                WHERE w.user_id = ww.user_id AND w.word = ww.word AND w.meaning = ww.meaning
                 ORDER BY w.id DESC
                 LIMIT 1
             ), '') AS phonetic,
             COALESCE((
                 SELECT NULLIF(TRIM(w.audio), '')
                 FROM words w
-                WHERE w.word = ww.word AND w.meaning = ww.meaning
+                WHERE w.user_id = ww.user_id AND w.word = ww.word AND w.meaning = ww.meaning
                 ORDER BY w.id DESC
                 LIMIT 1
             ), '') AS audio
         FROM wrong_words
         ww
-        WHERE ww.is_mastered = 0 AND ww.needs_review = 1
+        WHERE ww.user_id = ? AND ww.is_mastered = 0 AND ww.needs_review = 1
         ORDER BY RANDOM()
         LIMIT 4
-        '''
+        ''',
+        (user_id,),
     )
     rows = cursor.fetchall()
     if len(rows) == 0:
@@ -1385,6 +1748,9 @@ def get_wrong_question():
 
 @app.route('/wrong', methods=['GET'])
 def get_wrong():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
@@ -1396,15 +1762,15 @@ def get_wrong():
             COALESCE((
                 SELECT NULLIF(TRIM(w.audio), '')
                 FROM words w
-                WHERE w.word = ww.word AND w.meaning = ww.meaning
+                WHERE w.user_id = ww.user_id AND w.word = ww.word AND w.meaning = ww.meaning
                 ORDER BY w.id DESC
                 LIMIT 1
             ), '') AS audio,
             COALESCE((
                 SELECT b.name
                 FROM words w
-                LEFT JOIN books b ON b.id = w.book_id
-                WHERE w.word = ww.word AND w.meaning = ww.meaning
+                LEFT JOIN books b ON b.id = w.book_id AND b.user_id = w.user_id
+                WHERE w.user_id = ww.user_id AND w.word = ww.word AND w.meaning = ww.meaning
                 ORDER BY w.id DESC
                 LIMIT 1
             ), '未知词书') AS book_name,
@@ -1415,8 +1781,10 @@ def get_wrong():
             ww.last_wrong_at
         FROM wrong_words
         ww
+        WHERE ww.user_id = ?
         ORDER BY ww.is_focus DESC, ww.error_count DESC, ww.last_wrong_at DESC
-        '''
+        ''',
+        (user_id,),
     )
     rows = cursor.fetchall()
     conn.close()
@@ -1425,6 +1793,9 @@ def get_wrong():
 
 @app.route('/wrong/summary')
 def get_wrong_summary():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute(
@@ -1432,7 +1803,9 @@ def get_wrong_summary():
         SELECT COUNT(*) AS total_count,
                SUM(CASE WHEN is_mastered = 0 AND needs_review = 1 THEN 1 ELSE 0 END) AS pending_count
         FROM wrong_words
-        '''
+        WHERE user_id = ?
+        ''',
+        (user_id,),
     )
     summary = cursor.fetchone()
     cursor.execute(
@@ -1444,15 +1817,15 @@ def get_wrong_summary():
             COALESCE((
                 SELECT NULLIF(TRIM(w.audio), '')
                 FROM words w
-                WHERE w.word = ww.word AND w.meaning = ww.meaning
+                WHERE w.user_id = ww.user_id AND w.word = ww.word AND w.meaning = ww.meaning
                 ORDER BY w.id DESC
                 LIMIT 1
             ), '') AS audio,
             COALESCE((
                 SELECT b.name
                 FROM words w
-                LEFT JOIN books b ON b.id = w.book_id
-                WHERE w.word = ww.word AND w.meaning = ww.meaning
+                LEFT JOIN books b ON b.id = w.book_id AND b.user_id = w.user_id
+                WHERE w.user_id = ww.user_id AND w.word = ww.word AND w.meaning = ww.meaning
                 ORDER BY w.id DESC
                 LIMIT 1
             ), '未知词书') AS book_name,
@@ -1462,8 +1835,10 @@ def get_wrong_summary():
             ww.needs_review,
             ww.last_wrong_at
         FROM wrong_words ww
+        WHERE ww.user_id = ?
         ORDER BY ww.error_count DESC, ww.last_wrong_at DESC
-        '''
+        ''',
+        (user_id,),
     )
     heatmap_rows = [serialize_wrong(row) for row in cursor.fetchall()]
     conn.close()
@@ -1472,6 +1847,9 @@ def get_wrong_summary():
 
 @app.route('/wrong/export_excel')
 def export_wrong_excel():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     if Workbook is None:
         return jsonify({'error': 'openpyxl is required for excel export'}), 500
 
@@ -1489,14 +1867,16 @@ def export_wrong_excel():
             COALESCE((
                 SELECT b.name
                 FROM words w
-                LEFT JOIN books b ON b.id = w.book_id
-                WHERE w.word = ww.word AND w.meaning = ww.meaning
+                LEFT JOIN books b ON b.id = w.book_id AND b.user_id = w.user_id
+                WHERE w.user_id = ww.user_id AND w.word = ww.word AND w.meaning = ww.meaning
                 ORDER BY w.id DESC
                 LIMIT 1
             ), '未知词书') AS book_name
         FROM wrong_words ww
+        WHERE ww.user_id = ?
         ORDER BY ww.is_focus DESC, ww.error_count DESC, ww.last_wrong_at DESC
-        '''
+        ''',
+        (user_id,),
     )
     rows = cursor.fetchall()
     conn.close()
@@ -1537,6 +1917,9 @@ def export_wrong_excel():
 
 @app.route('/wrong/remove', methods=['POST'])
 def remove_wrong():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     data = request.json or {}
     word = data.get('word')
     meaning = data.get('answer') or data.get('meaning')
@@ -1544,7 +1927,7 @@ def remove_wrong():
         return jsonify({'error': 'word and meaning are required'}), 400
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM wrong_words WHERE word = ? AND meaning = ?", (word, meaning))
+    cursor.execute("DELETE FROM wrong_words WHERE user_id = ? AND word = ? AND meaning = ?", (user_id, word, meaning))
     conn.commit()
     conn.close()
     return jsonify({'msg': 'deleted'})
@@ -1552,13 +1935,19 @@ def remove_wrong():
 
 @app.route('/wrong/toggle_focus', methods=['POST'])
 def toggle_focus():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     data = request.json or {}
     word = data.get('word')
     meaning = data.get('meaning')
     is_focus = 1 if data.get('isFocus') else 0
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("UPDATE wrong_words SET is_focus = ? WHERE word = ? AND meaning = ?", (is_focus, word, meaning))
+    cursor.execute(
+        "UPDATE wrong_words SET is_focus = ? WHERE user_id = ? AND word = ? AND meaning = ?",
+        (is_focus, user_id, word, meaning),
+    )
     conn.commit()
     conn.close()
     return jsonify({'msg': 'updated'})
@@ -1566,6 +1955,9 @@ def toggle_focus():
 
 @app.route('/wrong/mark_mastered', methods=['POST'])
 def mark_mastered():
+    user_id = require_user_id()
+    if not user_id:
+        return jsonify({'error': 'user_id required'}), 401
     data = request.json or {}
     word = data.get('word')
     meaning = data.get('meaning')
@@ -1573,7 +1965,10 @@ def mark_mastered():
     needs_review = 0 if is_mastered else 1
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute("UPDATE wrong_words SET is_mastered = ?, needs_review = ? WHERE word = ? AND meaning = ?", (is_mastered, needs_review, word, meaning))
+    cursor.execute(
+        "UPDATE wrong_words SET is_mastered = ?, needs_review = ? WHERE user_id = ? AND word = ? AND meaning = ?",
+        (is_mastered, needs_review, user_id, word, meaning),
+    )
     conn.commit()
     conn.close()
     return jsonify({'msg': 'updated'})

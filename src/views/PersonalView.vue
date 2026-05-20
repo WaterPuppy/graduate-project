@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { getTodayStudySeconds } from '../utils/studyTime'
 import HomeIconButton from '../components/HomeIconButton.vue'
+import { clearUserSessionCache } from '../utils/auth'
 
 const router = useRouter()
 
@@ -118,7 +119,7 @@ function cancelLogout() {
 }
 
 function confirmLogout() {
-  localStorage.removeItem('auth-user')
+  clearUserSessionCache()
   authUser.value = null
   showLogoutConfirm.value = false
   router.push('/')
@@ -205,9 +206,6 @@ watch(selectedBookId, async () => {
         <div class="avatar-wrap" @click="logoutByAvatar">
           <img v-if="authUser?.avatar" :src="authUser.avatar" alt="用户头像" class="avatar-image" />
           <div v-else class="avatar">👤</div>
-          <p>{{ authUser?.id ? '已登录' : '未登录' }}</p>
-          <small>{{ authUser?.id ? `${authUser.username}（点击头像退出）` : '（点击头像去登录）' }}</small>
-          <small v-if="authUser?.id" class="user-email">{{ authUser.email }}</small>
         </div>
         <div class="profile-copy">
           <div class="book-title-row">
@@ -339,11 +337,12 @@ watch(selectedBookId, async () => {
   margin: 14px;
   border-radius: 12px;
   background: #9f715b;
-  display: grid;
-  place-content: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   text-align: center;
-  gap: 2px;
   cursor: pointer;
+  overflow: hidden;
 }
 
 .avatar {
@@ -351,26 +350,10 @@ watch(selectedBookId, async () => {
 }
 
 .avatar-image {
-  width: 74px;
-  height: 74px;
-  border-radius: 50%;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
   object-fit: cover;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-}
-
-.avatar-wrap p {
-  margin: 0;
-  font-size: 1.05rem;
-}
-
-.avatar-wrap small {
-  color: #dbeafe;
-}
-
-.user-email {
-  font-size: 0.76rem;
-  opacity: 0.88;
-  word-break: break-all;
 }
 
 .profile-copy {

@@ -15,6 +15,7 @@ const audioPlayer = ref(null)
 const books = ref([])
 const importBookId = ref(null)
 const selectedWrongKeys = ref([])
+const loadError = ref('')
 
 const displayedList = computed(() =>
   activeTab.value === 'pending'
@@ -51,6 +52,7 @@ function formatStatus(item) {
 
 async function fetchWrongBook() {
   isLoading.value = true
+  loadError.value = ''
 
   try {
     const [listRes, summaryRes] = await Promise.all([
@@ -58,8 +60,24 @@ async function fetchWrongBook() {
       fetch('http://127.0.0.1:5001/wrong/summary')
     ])
 
+    if (listRes.status === 401 || summaryRes.status === 401) {
+      loadError.value = '请先登录后查看错题本'
+      wrongList.value = []
+      totalCount.value = 0
+      pendingCount.value = 0
+      return
+    }
+
     const listData = await listRes.json()
     const summaryData = await summaryRes.json()
+
+    if (!listRes.ok || !Array.isArray(listData)) {
+      loadError.value = (listData && listData.error) || '错题数据加载失败'
+      wrongList.value = []
+      totalCount.value = 0
+      pendingCount.value = 0
+      return
+    }
 
     wrongList.value = listData
     totalCount.value = summaryData.totalCount ?? listData.length
@@ -75,6 +93,7 @@ async function fetchWrongBook() {
     }
   } catch (error) {
     console.error('获取错题本失败', error)
+    loadError.value = '获取错题本失败，请稍后重试'
   } finally {
     isLoading.value = false
   }
@@ -311,6 +330,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-if="isLoading" class="empty-state">正在加载错题本...</div>
+      <div v-else-if="loadError" class="empty-state">{{ loadError }}</div>
 
       <div v-else-if="displayedList.length === 0" class="empty-state">
         当前还没有可展示的错题。

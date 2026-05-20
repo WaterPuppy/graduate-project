@@ -30,14 +30,45 @@ async function ensureFavoriteBookId() {
 }
 
 async function fetchWordMeaning(word) {
+  async function translateToChinese(text) {
+    try {
+      const tRes = await fetch(`${API_BASE}/api/ai/reading/import`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      })
+      const tData = await tRes.json()
+      const zh = String(tData?.chinese || '').trim()
+      if (tRes.ok && tData?.success && zh) {
+        return zh
+      }
+      return ''
+    } catch {
+      return ''
+    }
+  }
+
   try {
     const res = await fetch(`${API_BASE}/dictionary_search?word=${encodeURIComponent(word)}`)
-    if (!res.ok) return ''
+    if (!res.ok) {
+      // 词典查不到时，回退翻译单词本身
+      return await translateToChinese(word)
+    }
     const data = await res.json()
     const first = (data.meanings || [])[0]
-    return String(first?.definition || '').trim()
+    const definition = String(first?.definition || '').trim()
+    if (!definition) {
+      // 没有英英释义时，回退翻译单词本身
+      return await translateToChinese(word)
+    }
+
+    // 二次翻译：将英英释义转为中文，失败时回退英文释义
+    const zh = await translateToChinese(definition)
+    if (zh) return zh
+
+    return definition
   } catch {
-    return ''
+    return await translateToChinese(word)
   }
 }
 

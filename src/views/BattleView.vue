@@ -465,36 +465,57 @@ function confirmGoBack() {
 }
 
 async function saveWrongQuestion() {
-  await fetch('http://127.0.0.1:5001/wrong', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(currentQuestion.value)
-  })
+  try {
+    const res = await fetch('http://127.0.0.1:5001/wrong', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(currentQuestion.value)
+    })
+    if (!res.ok) {
+      console.warn('保存错题失败:', res.status)
+    }
+  } catch (error) {
+    console.warn('保存错题异常:', error)
+  }
 }
 
 async function markWrongAsMastered() {
-  await fetch('http://127.0.0.1:5001/wrong/mark_mastered', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      word: currentQuestion.value.word,
-      meaning: currentQuestion.value.answer,
-      isMastered: true
+  try {
+    const res = await fetch('http://127.0.0.1:5001/wrong/mark_mastered', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        word: currentQuestion.value.word,
+        meaning: currentQuestion.value.answer,
+        isMastered: true
+      })
     })
-  })
+    if (!res.ok) {
+      console.warn('标记已掌握失败:', res.status)
+    }
+  } catch (error) {
+    console.warn('标记已掌握异常:', error)
+  }
 }
 
 async function logStudyAction(action) {
   if (!currentQuestion.value.word) return
-  await fetch('http://127.0.0.1:5001/study/log', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      word: currentQuestion.value.word,
-      bookId: currentBookId.value || null,
-      action
+  try {
+    const res = await fetch('http://127.0.0.1:5001/study/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        word: currentQuestion.value.word,
+        bookId: currentBookId.value || null,
+        action
+      })
     })
-  })
+    if (!res.ok) {
+      console.warn('学习日志记录失败:', res.status)
+    }
+  } catch (error) {
+    console.warn('学习日志记录异常:', error)
+  }
 }
 
 function pickBossIntent() {
